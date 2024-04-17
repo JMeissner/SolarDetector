@@ -1,11 +1,15 @@
 import sys
+from io import BytesIO
 
 from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QSplitter, QLabel, QPushButton, QHBoxLayout, QLineEdit
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import QUrl
+from PyQt5.QtGui import QPixmap, QImage
 import requests
 import geopy
 import time
+import skimage.io
+import inference
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -16,14 +20,18 @@ class MainWindow(QMainWindow):
 
         # Create a central widget and a layout
         central_widget = QWidget()
-        layout = QHBoxLayout()
-        central_widget.setLayout(layout)
+        self.layout = QHBoxLayout()
+        central_widget.setLayout(self.layout)
 
         # Create a QWebEngineView
         self.view = QWebEngineView()
 
         #create an inputfield
         self.adress_field = QLineEdit()
+        self.btn_back = QPushButton("Back")
+
+        #load the models
+        self.model_solar, self.model_houses = inference.loadmodels()
 
         # Load the Leaflet library and initialize the map
         html = """
@@ -85,9 +93,16 @@ class MainWindow(QMainWindow):
          # Create a sidebar widget
         self.sidebar = MainWindow.create_sidebar(self)
 
+        # Create an image widget
+        self.image_widget = QLabel()
+        self.image_widget.setPixmap(QPixmap("images\map_31135.jpg"))
+        self.image_widget.setScaledContents(True)
+
         # Add the QWebEngineView and the sidebar to the splitter
-        layout.addWidget(self.view, 4)
-        layout.addWidget(self.sidebar, 1)
+        self.layout.addWidget(self.image_widget, 4)
+        self.image_widget.hide()
+        self.layout.addWidget(self.view, 4)
+        self.layout.addWidget(self.sidebar, 1)
 
         self.setCentralWidget(central_widget)
 
@@ -110,7 +125,12 @@ class MainWindow(QMainWindow):
         btn_jump_to_adress = QPushButton("Jump to Adress")
         btn_jump_to_adress.pressed.connect(lambda: self.jump_to_adress())
 
-        btn_load_image = QPushButton("Load image")
+        self.btn_back.pressed.connect(lambda: self.toggle_view())
+
+        btn_detect_image = QPushButton("Detect")
+        btn_detect_image.pressed.connect(lambda: self.detect())
+
+        btn_load_image = QPushButton("Download image")
         btn_load_image.pressed.connect(lambda: self.load_image())
 
         layout.addWidget(header)
@@ -118,15 +138,32 @@ class MainWindow(QMainWindow):
         layout.addWidget(adress_label)
         layout.addWidget(self.adress_field)
         layout.addWidget(btn_jump_to_adress)
+        layout.addWidget(self.btn_back)
+        self.btn_back.hide()
         layout.addStretch()
+        layout.addWidget(btn_detect_image)
         layout.addWidget(btn_load_image)
         sidebar.setLayout(layout)
 
         return sidebar
     
     def load_image(self):
-        self.view.page().runJavaScript("getViewportBounds();", self.handle_viewport_bounds)
+        self.view.page().runJavaScript("getViewportBounds();", self.download_from_bounds)
         return
+    
+    def detect(self):
+        self.view.page().runJavaScript("getViewportBounds();", self.detect_from_bounds)
+        return
+    
+    def toggle_view(self):
+        if self.view.isHidden():
+            self.image_widget.hide()
+            self.view.show()
+        else:
+            self.view.hide()
+            self.image_widget.show()
+            self.image_widget.setScaledContents(True)
+            self.btn_back.show()
     
     def jump_to_adress(self):
         coordinates = MainWindow.get_coordinates(self.adress_field.text())
@@ -141,7 +178,7 @@ class MainWindow(QMainWindow):
         self.view.page().runJavaScript(f"jumpToCoordinates({latitude}, {longitude}, {19});")
         return
 
-    def handle_viewport_bounds(self, result):
+    def download_from_bounds(self, result):
         # Azure Maps subscription key
         subscription_key = "Ap9-hl_U2JlIk9MNIe6dwta-lU2i7KaTqtQekLmjjX6cdKaIZ5IcLpHgAA_SBivp"
 
@@ -169,6 +206,39 @@ class MainWindow(QMainWindow):
             with open(f"images/map_{rnd}.jpg", "wb") as file:
                 file.write(response.content)
             print("Map image saved successfully.")
+        else:
+            print(f"Error: {response.status_code} - {response.text}")
+        #print(result)
+
+    def detect_from_bounds(self, result):
+        # Azure Maps subscription key
+        subscription_key = "Ap9-hl_U2JlIk9MNIe6dwta-lU2i7KaTqtQekLmjjX6cdKaIZ5IcLpHgAA_SBivp"
+
+        # Extract the bounding box coordinates from the result variable
+        west_longitude = result['southWest']['lng']
+        south_latitude = result['southWest']['lat']
+        east_longitude = result['northEast']['lng']
+        north_latitude = result['northEast']['lat']
+
+        # Construct the bounding box string
+        bbox = f"{south_latitude},{west_longitude},{north_latitude},{east_longitude}"
+
+        # Construct the URL for the Get Map Static request
+        url = f"https://dev.virtualearth.net/REST/v1/Imagery/Map/Aerial?mapArea={bbox}&mapSize=1280,900&key={subscription_key}"
+
+        # Send the GET request to the Azure Maps service
+        response = requests.get(url)
+
+        # Check if the request was successful
+        if response.status_code == 200:
+            # Save the map image to a imagfe object
+            print(response.content)
+            image = skimage.io.imread(BytesIO(response.content))
+            print("Map image read successfully. Starting inference...")
+            result_img = inference.inference(image, self.model_solar, self.model_houses)
+            result_qimg = QImage(result_img.tobytes("raw", "RGBA"), result_img.width, result_img.height, QImage.Format_RGBA8888)
+            self.image_widget.setPixmap(QPixmap(result_qimg))
+            self.toggle_view()
         else:
             print(f"Error: {response.status_code} - {response.text}")
         #print(result)
